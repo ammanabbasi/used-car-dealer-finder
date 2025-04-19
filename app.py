@@ -1,5 +1,5 @@
-import streamlit as st
-import openai
+﻿import streamlit as st
+from openai import OpenAI
 import os
 from dotenv import load_dotenv
 import requests
@@ -35,8 +35,8 @@ if not google_api_key:
         st.error("Google Maps API key not found. Please set the GOOGLE_MAPS_API_KEY in your environment or Streamlit secrets.")
         st.stop()
 
-# Set OpenAI API key
-openai.api_key = api_key
+# Initialize OpenAI client (Do this once, perhaps globally or where needed)
+# We'll initialize it inside the function for now to keep changes localized
 
 # Initialize Google Maps client
 gmaps = googlemaps.Client(key=google_api_key)
@@ -97,108 +97,105 @@ def format_rating(rating_text):
         return rating_text
 
 def get_dealer_info(zipcode):
-    """Get real dealer information using Google Places API."""
+    """Get real dealer information using Google Places API (Text Search)."""
     try:
-        # First, get the location (lat/lng) for the zipcode
-        geocode_result = gmaps.geocode(zipcode)
-        
-        if not geocode_result:
-            st.error(f"Could not find location for zip code {zipcode}")
-            return None
-            
-        location = geocode_result[0]['geometry']['location']
-        
+        # Geocoding is no longer strictly needed for the search query,
+        # but could potentially be used for result biasing if desired later.
+        # geocode_result = gmaps.geocode(zipcode)
+        # if not geocode_result:
+        #     st.error(f"Could not find location for zip code {zipcode}")
+        #     return None
+        # location = geocode_result[0]['geometry']['location']
+
         dealers = []
-        # Specific search queries for independent used car dealers
-        search_queries = [
-            'independent used car dealer',
-            'used car dealer',
-            'pre-owned car dealer',
-            'used auto sales',
-            'used vehicle dealer'
-        ]
-        
-        with st.spinner("Searching for independent used car dealers..."):
-            # Try each search query
-            for query in search_queries:
-                # Initial search with increased radius to find more dealers
-                places_result = gmaps.places_nearby(
-                    location=location,
-                    radius=15000,  # 15km radius
-                    keyword=query,
-                    type='car_dealer'
+        # Construct the text search query
+        search_query = f"used car dealer in {zipcode}"
+        # st.write(f"Using Text Search query: '{search_query}'") # Removed Debug output
+
+        # Perform the initial Text Search
+        places_result = gmaps.places(
+            query=search_query,
+            type='car_dealer'
+            # We could add location bias here if needed:
+            # location=location, # From geocoding
+            # radius=50000 # Max radius for bias
+        )
+
+        # Process results
+        if places_result.get('results'):
+            # st.write(f"Initial search found {len(places_result.get('results', []))} results.") # Removed Debug output
+            process_results(places_result.get('results'), dealers, zipcode)
+
+            # Get next pages while available
+            while 'next_page_token' in places_result:
+                # st.write("Fetching next page...") # Removed Debug output
+                time.sleep(2)  # Wait for token to be valid
+                places_result = gmaps.places(
+                    query=search_query, # Query might be needed for subsequent pages too
+                    page_token=places_result['next_page_token']
                 )
-                
-                # Process results
                 if places_result.get('results'):
+                    # st.write(f"Next page found {len(places_result.get('results', []))} results.") # Removed Debug output
                     process_results(places_result.get('results'), dealers, zipcode)
-                    
-                    # Get next pages while available
-                    while 'next_page_token' in places_result:
-                        time.sleep(2)  # Wait for token to be valid
-                        places_result = gmaps.places_nearby(
-                            location=location,
-                            page_token=places_result['next_page_token']
-                        )
-                        if places_result.get('results'):
-                            process_results(places_result.get('results'), dealers, zipcode)
-        
+
         # Remove duplicates based on place_id
         unique_dealers = {dealer['place_id']: dealer for dealer in dealers}.values()
-        
+
+        # st.write(f"Found {len(unique_dealers)} unique dealers after filtering for zip {zipcode}.") # Removed Debug output
         return list(unique_dealers)
-        
+
     except Exception as e:
         st.error(f"Error finding dealer information: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc()) # Print full traceback for debugging
         return None
 
 def process_results(results, dealers, target_zipcode):
-    """Process place results and add to dealers list if zipcode matches."""
+    """Process place results and add to dealers list if zipcode is in the formatted address."""
+    # st.write(f"Processing {len(results)} results for zip {target_zipcode}...") # Removed Debug output
     for place in results:
         try:
             # Get detailed information for each place
             details = gmaps.place(place['place_id'], fields=[
                 'name', 'formatted_address', 'formatted_phone_number',
-                'website', 'place_id'
+                'website', 'place_id' # Removed address_component
             ])['result']
-            
-            # Extract zipcode from address
+
             address = details.get('formatted_address', '')
-            address_zipcode = extract_zipcode(address)
-            
-            # Only add dealer if zipcode matches
-            if address_zipcode == target_zipcode:
+            dealer_name = details.get('name', 'Unknown Place')
+
+            # Simple check: If target zip code string exists anywhere in the formatted address
+            if target_zipcode in address:
+                # st.write(f"  - Including {dealer_name} (Address: '{address}')") # Removed Debug output
                 dealer = {
-                    'business_name': details.get('name'),
-                    'full_address': details.get('formatted_address'),
+                    'business_name': dealer_name,
+                    'full_address': address,
                     'phone_number': details.get('formatted_phone_number'),
                     'website': details.get('website'),
                     'place_id': place['place_id']
                 }
                 dealers.append(dealer)
-            
+            else: # Log why a dealer was skipped (keeping this one commented out)
+                 # st.write(f"--> Skipping {dealer_name} - Zip '{target_zipcode}' not found in address: '{address}'")
+                 pass # No action needed if skipping
+
             # Respect API rate limits
             time.sleep(0.1)
-            
-        except Exception as e:
-            st.warning(f"Error processing dealer: {str(e)}")
-            continue
 
-def extract_zipcode(address):
-    """Extract zipcode from formatted address."""
-    try:
-        # Look for 5-digit zipcode in the address
-        match = re.search(r'[,\s](\d{5})[,\s-]', address)
-        if match:
-            return match.group(1)
-    except:
-        pass
-    return None
+        except Exception as e:
+            st.warning(f"Error processing dealer {place.get('name', 'Unknown')}: {str(e)}")
+            import traceback
+            st.error(traceback.format_exc()) # Print full traceback for debugging
+            continue
 
 def extract_website_info(url):
     """Extract and analyze information from dealer website."""
+    global api_key # Access the global api_key variable
     try:
-        st.write("Downloading website content...")  # Debug log
+        # Initialize OpenAI Client here
+        client = OpenAI(api_key=api_key)
+
+        # st.write("Downloading website content...")  # Removed Debug log
         
         # Try to get the webpage content
         downloaded = trafilatura.fetch_url(url)
@@ -207,12 +204,12 @@ def extract_website_info(url):
             return None
             
         # Extract main content
-        st.write("Extracting main content...")  # Debug log
+        # st.write("Extracting main content...")  # Removed Debug log
         text_content = trafilatura.extract(downloaded, include_links=True, include_images=False, include_tables=False)
         
         # Try BeautifulSoup if trafilatura fails
         if not text_content:
-            st.write("Trying alternative content extraction...")  # Debug log
+            # st.write("Trying alternative content extraction...")  # Removed Debug log
             response = requests.get(url, timeout=10)
             soup = BeautifulSoup(response.text, 'html.parser')
             
@@ -227,7 +224,7 @@ def extract_website_info(url):
             st.warning("Could not extract meaningful content from the website")
             return None
             
-        st.write("Analyzing content with OpenAI...")  # Debug log
+        # st.write("Analyzing content with OpenAI...")  # Removed Debug log
         
         # Use OpenAI to analyze the content
         analysis_prompt = f"""
@@ -286,7 +283,8 @@ def extract_website_info(url):
         Try to be comprehensive and include any relevant information you find.
         """
 
-        response = openai.ChatCompletion.create(
+        # Updated OpenAI API call using the client
+        response = client.chat.completions.create(
             model="gpt-3.5-turbo-16k",
             messages=[
                 {
@@ -297,11 +295,13 @@ def extract_website_info(url):
             ],
             temperature=0.5,
             max_tokens=2000
+            # response_format={ "type": "json_object" } # Consider adding if model supports and consistently returns JSON
         )
-        
-        # Parse the response as JSON
-        analysis = json.loads(response.choices[0].message.content)
-        st.write("Analysis completed successfully!")  # Debug log
+
+        # Parse the response as JSON (Access content differently)
+        analysis_content = response.choices[0].message.content
+        analysis = json.loads(analysis_content)
+        # st.write("Analysis completed successfully!")  # Removed Debug log
         return analysis
         
     except Exception as e:
@@ -894,18 +894,36 @@ st.markdown('<p class="subtitle">Find independent used car dealers in your area<
 # Zipcode input
 zipcode = st.text_input("Enter Zip Code", placeholder="e.g., 20136", max_chars=5)
 
+# --- Removed Radius Selection --- 
+# radius_options_miles = {
+#     "5 Miles": 8000,  # Approx 5 miles in meters
+#     "10 Miles": 16000, # Approx 10 miles in meters
+#     "15 Miles": 24000  # Approx 15 miles in meters
+# }
+# selected_radius_label = st.selectbox(
+#     "Select Search Radius:",
+#     options=list(radius_options_miles.keys()),
+#     index=2 # Default to 15 miles (was 0 for 5 miles)
+# )
+# radius_meters = radius_options_miles[selected_radius_label]
+
+
 if st.button("Find Dealers", type="primary"):
     if not zipcode:
         st.warning("Please enter a zip code.")
     elif not verify_zipcode(zipcode):
         st.error("Please enter a valid 5-digit zip code.")
     else:
-        with st.spinner(f"Finding independent used car dealers in {zipcode}..."):
+        # Removed radius info from message
+        st.info(f"Searching for dealers in {zipcode}...") 
+        with st.spinner(f"Finding independent used car dealers..."):
+            # Call function without radius
             dealers = get_dealer_info(zipcode)
-            
+
             if dealers and len(dealers) > 0:
+                 # Removed radius info from message
                 st.success(f"Found {len(dealers)} independent dealers in {zipcode}")
-                
+
                 for dealer in dealers:
                     try:
                         dealer_name = dealer.get('business_name', 'Unknown Dealer')
